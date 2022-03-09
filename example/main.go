@@ -49,12 +49,27 @@ func main() {
 		"console=hvc0",
 		// Stop in the initial ramdisk before attempting to transition to
 		// the root file system.
-		"root=/dev/vda",
+		"sys=/dev/vda",
+		"debug_init",
 	}
 
 	vmlinuz := os.Getenv("VMLINUZ_PATH")
 	initrd := os.Getenv("INITRD_PATH")
 	diskPath := os.Getenv("DISKIMG_PATH")
+
+	sharePath := os.Getenv("SHARE_PATH")
+
+	if vmlinuz == "" {
+		vmlinuz = "vmlinux"
+	}
+
+	if initrd == "" {
+		initrd = "initrd"
+	}
+
+	if diskPath == "" {
+		diskPath = "sys.fs"
+	}
 
 	bootLoader := vz.NewLinuxBootLoader(
 		vmlinuz,
@@ -108,6 +123,20 @@ func main() {
 	config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
 		vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration(),
 	})
+
+	if sharePath != "" {
+		fs := vz.NewVirtioFileSystemDeviceConfiguration("msl")
+
+		fs.SetDirectoryShare(
+			vz.NewSingleDirectoryShare(
+				vz.NewSharedDirectory(sharePath, false),
+			),
+		)
+
+		config.SetDirectorySharingDevicesVirtualMachineConfiguration([]vz.DirectorySharingDeviceConfiguration{
+			fs,
+		})
+	}
 
 	// socket device (optional)
 	config.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{
