@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	l "log"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -49,13 +51,18 @@ func main() {
 		"console=hvc0",
 		// Stop in the initial ramdisk before attempting to transition to
 		// the root file system.
-		"sys=/dev/vda",
-		"debug_init",
+		"root=/dev/vda",
+		"overlaytmpfs",
+		"data=/dev/vdb",
+		"vol_user=/dev/vdc",
+		"share_home=home",
 	}
 
 	vmlinuz := os.Getenv("VMLINUZ_PATH")
 	initrd := os.Getenv("INITRD_PATH")
 	diskPath := os.Getenv("DISKIMG_PATH")
+	dataPath := os.Getenv("DATA_PATH")
+	userPath := os.Getenv("USER_PATH")
 
 	sharePath := os.Getenv("SHARE_PATH")
 
@@ -69,6 +76,21 @@ func main() {
 
 	if diskPath == "" {
 		diskPath = "sys.fs"
+	}
+
+	if dataPath == "" {
+		dataPath = "data.fs"
+	}
+
+	if userPath == "" {
+		userPath = "user.fs"
+	}
+
+	if sharePath == "" {
+		sharePath, err = os.Getwd()
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	bootLoader := vz.NewLinuxBootLoader(
@@ -109,15 +131,73 @@ func main() {
 
 	diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
 		diskPath,
-		false,
+		true,
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 	storageDeviceConfig := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
-	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
+	storageConfigs := []vz.StorageDeviceConfiguration{
 		storageDeviceConfig,
-	})
+	}
+
+	if dataPath != "" {
+		_, err := os.Stat(dataPath)
+		if err != nil {
+			f, err := os.Create(dataPath)
+			if err != nil {
+				panic(err)
+			}
+
+			err = f.Truncate(20 * 1024 * 1024 * 1024)
+			if err != nil {
+				panic(err)
+			}
+
+			f.Close()
+		}
+
+		diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+			dataPath,
+			false,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		storageConfigs = append(storageConfigs,
+			vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment))
+	}
+
+	if userPath != "" {
+		_, err := os.Stat(userPath)
+		if err != nil {
+			f, err := os.Create(userPath)
+			if err != nil {
+				panic(err)
+			}
+
+			err = f.Truncate(20 * 1024 * 1024 * 1024)
+			if err != nil {
+				panic(err)
+			}
+
+			f.Close()
+		}
+
+		diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+			userPath,
+			false,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		storageConfigs = append(storageConfigs,
+			vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment))
+	}
+
+	config.SetStorageDevicesVirtualMachineConfiguration(storageConfigs)
 
 	// traditional memory balloon device which allows for managing guest memory. (optional)
 	config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
@@ -125,7 +205,7 @@ func main() {
 	})
 
 	if sharePath != "" {
-		fs := vz.NewVirtioFileSystemDeviceConfiguration("msl")
+		fs := vz.NewVirtioFileSystemDeviceConfiguration("home")
 
 		fs.SetDirectoryShare(
 			vz.NewSingleDirectoryShare(
@@ -148,6 +228,37 @@ func main() {
 	}
 
 	vm := vz.NewVirtualMachine(config)
+
+	sock := vm.SocketDevices()[0]
+
+	l, err := net.Listen("tcp", ":11811")
+	if err != nil {
+		panic(err)
+	}
+
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				log.Printf("making connetion to vsock")
+				sock.ConnectToPort(12, func(conn *vz.VirtioSocketConnection, err error) {
+					defer c.Close()
+
+					if err != nil {
+						log.Printf("error making connection: %s", err)
+					} else {
+						log.Printf("connetion made to vsock")
+						go io.Copy(c, conn)
+						io.Copy(conn, c)
+					}
+				})
+			}()
+		}
+	}()
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, syscall.SIGTERM)
